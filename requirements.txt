@@ -1,0 +1,9 @@
+streamlit>=1.28.0
+faster-whisper>=0.9.0
+ffmpeg-python>=0.2.0
+translate>=3.6.1
+gtts>=2.5.1
+pysrt>=1.1.2
+pydub>=0.25.1
+moviepy>=1.0.3
+pytube>=15.0.0
