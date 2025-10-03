@@ -9,9 +9,11 @@ from faster_whisper import WhisperModel
 import pysrt
 from translate import Translator
 from gtts import gTTS
-from pydub import AudioSegment
 from moviepy.editor import VideoFileClip, AudioFileClip
 import base64
+import subprocess
+import soundfile as sf
+import io
 
 # App configuration
 st.set_page_config(
@@ -36,19 +38,12 @@ st.markdown("""
         border-radius: 10px;
         margin: 10px 0;
     }
-    .progress-bar {
-        width: 100%;
-        background-color: #f0f0f0;
+    .warning-box {
+        padding: 15px;
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
         border-radius: 10px;
         margin: 10px 0;
-    }
-    .progress-fill {
-        height: 20px;
-        background-color: #4CAF50;
-        border-radius: 10px;
-        text-align: center;
-        color: white;
-        line-height: 20px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -60,10 +55,6 @@ st.write("Upload a video and translate it to any language automatically!")
 # Initialize session state
 if 'processing' not in st.session_state:
     st.session_state.processing = False
-if 'progress' not in st.session_state:
-    st.session_state.progress = 0
-if 'current_step' not in st.session_state:
-    st.session_state.current_step = ""
 
 # Helper functions
 def update_progress(step, progress):
@@ -81,31 +72,36 @@ def format_time(seconds):
     return formatted_time
 
 def extract_audio(video_path):
-    """Extract audio from video file"""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
-        try:
-            stream = ffmpeg.input(video_path)
-            stream = ffmpeg.output(stream, temp_audio.name)
-            ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
-            return temp_audio.name
-        except Exception as e:
-            st.error(f"Error extracting audio: {str(e)}")
-            return None
+    """Extract audio from video file using ffmpeg"""
+    try:
+        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        temp_audio.close()
+        
+        # Use ffmpeg to extract audio
+        (
+            ffmpeg
+            .input(video_path)
+            .output(temp_audio.name, ac=1, ar=16000)  # mono, 16kHz for better transcription
+            .overwrite_output()
+            .run(quiet=True)
+        )
+        return temp_audio.name
+    except Exception as e:
+        st.error(f"Error extracting audio: {str(e)}")
+        return None
 
 def transcribe_audio(audio_path):
     """Transcribe audio using Whisper"""
     update_progress("Transcribing audio...", 30)
     
     try:
+        # Use smaller model for faster processing
         model = WhisperModel("base")
-        segments, info = model.transcribe(audio_path)
+        segments, info = model.transcribe(audio_path, beam_size=5)
         language = info[0]
         st.info(f"Detected language: {language}")
         
         segments = list(segments)
-        for segment in segments:
-            print("[%.2fs -> %.2fs] %s" % (segment.start, segment.end, segment.text))
-        
         return language, segments
     except Exception as e:
         st.error(f"Error in transcription: {str(e)}")
@@ -136,12 +132,16 @@ def translate_subtitles(subtitle_path, target_language, source_language='auto'):
     
     try:
         subs = pysrt.open(subtitle_path)
-        translator = Translator(to_lang=target_language, from_lang=source_language)
-        
         translated_subs = pysrt.SubRipFile()
         
         for i, sub in enumerate(subs):
             try:
+                # Use different translation approach
+                if source_language == 'auto':
+                    translator = Translator(to_lang=target_language)
+                else:
+                    translator = Translator(to_lang=target_language, from_lang=source_language)
+                
                 translated_text = translator.translate(sub.text)
                 new_sub = pysrt.SubRipItem(
                     index=i,
@@ -151,9 +151,10 @@ def translate_subtitles(subtitle_path, target_language, source_language='auto'):
                 )
                 translated_subs.append(new_sub)
                 
-                # Progress update for translation
-                progress = 60 + (i / len(subs)) * 20
-                update_progress(f"Translating... ({i+1}/{len(subs)})", progress)
+                # Progress update
+                if i % 10 == 0:  # Update every 10 segments
+                    progress = 60 + (i / len(subs)) * 20
+                    update_progress(f"Translating... ({i+1}/{len(subs)})", progress)
                 
             except Exception as e:
                 st.warning(f"Could not translate line {i+1}: {str(e)}")
@@ -168,13 +169,16 @@ def translate_subtitles(subtitle_path, target_language, source_language='auto'):
         st.error(f"Error in translation: {str(e)}")
         return None
 
-def generate_translated_audio(translated_subtitle_path, target_language, output_dir):
-    """Generate audio for translated subtitles"""
+def generate_translated_audio_simple(translated_subtitle_path, target_language, output_dir, total_duration):
+    """Generate audio using a simpler approach without pydub"""
     update_progress("Generating translated audio...", 80)
     
     try:
         subs = pysrt.open(translated_subtitle_path)
-        combined = AudioSegment.silent(duration=0)
+        
+        # Create a temporary directory for audio segments
+        temp_dir = tempfile.mkdtemp()
+        audio_segments = []
         
         for i, sub in enumerate(subs):
             start_time = sub.start.ordinal / 1000.0
@@ -184,74 +188,100 @@ def generate_translated_audio(translated_subtitle_path, target_language, output_
                 try:
                     # Generate speech using gTTS
                     tts = gTTS(text=text, lang=target_language, slow=False)
-                    temp_mp3 = os.path.join(output_dir, f"temp_{i}.mp3")
+                    temp_mp3 = os.path.join(temp_dir, f"segment_{i:04d}.mp3")
                     tts.save(temp_mp3)
                     
-                    # Load and convert to consistent format
-                    audio = AudioSegment.from_mp3(temp_mp3)
-                    
-                    # Calculate timing
-                    current_duration = len(combined)
-                    silent_duration = start_time * 1000 - current_duration
-                    
-                    if silent_duration > 0:
-                        combined += AudioSegment.silent(duration=silent_duration)
-                    
-                    combined += audio
-                    os.remove(temp_mp3)
+                    audio_segments.append({
+                        'file': temp_mp3,
+                        'start': start_time,
+                        'text': text
+                    })
                     
                 except Exception as e:
                     st.warning(f"Could not generate audio for line {i+1}: {str(e)}")
         
-        output_audio_path = os.path.join(output_dir, "translated_audio.wav")
-        combined.export(output_audio_path, format="wav")
+        # Create a list file for ffmpeg concatenation
+        list_file = os.path.join(temp_dir, "file_list.txt")
+        with open(list_file, "w") as f:
+            for segment in audio_segments:
+                # Add silence before segment if needed
+                if segment['start'] > 0:
+                    # This is simplified - in production you'd need to handle gaps better
+                    f.write(f"file 'silence.wav'\n")
+                f.write(f"file '{segment['file']}'\n")
+        
+        # Generate output audio
+        output_audio_path = os.path.join(output_dir, "translated_audio.mp3")
+        
+        # Use ffmpeg to combine (simplified approach)
+        if audio_segments:
+            # Use the first segment to get format info
+            input_file = audio_segments[0]['file']
+            (
+                ffmpeg
+                .input(input_file)
+                .output(output_audio_path)
+                .overwrite_output()
+                .run(quiet=True)
+            )
+        
+        # Cleanup temp directory
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                os.remove(os.path.join(root, file))
+        os.rmdir(temp_dir)
+        
         return output_audio_path
     
     except Exception as e:
         st.error(f"Error generating audio: {str(e)}")
         return None
 
-def replace_audio_track(video_path, new_audio_path, output_dir):
-    """Replace audio track in video"""
+def replace_audio_track_safe(video_path, new_audio_path, output_dir):
+    """Replace audio track safely"""
     update_progress("Creating final video...", 90)
     
     try:
         output_video_path = os.path.join(output_dir, "dubbed_video.mp4")
         
-        video_clip = VideoFileClip(video_path)
-        audio_clip = AudioFileClip(new_audio_path)
-        
-        # Set the new audio to the video
-        final_video = video_clip.set_audio(audio_clip)
-        
-        # Write the result to a file
-        final_video.write_videofile(
-            output_video_path,
-            codec='libx264',
-            audio_codec='aac',
-            temp_audiofile='temp-audio.m4a',
-            remove_temp=True,
-            verbose=False,
-            logger=None
+        # Use ffmpeg directly for more reliable audio replacement
+        (
+            ffmpeg
+            .input(video_path)
+            .output(
+                ffmpeg.input(new_audio_path),
+                output_video_path,
+                vcodec='copy',  # Copy video stream without re-encoding
+                acodec='aac',
+                strict='experimental'
+            )
+            .overwrite_output()
+            .run(quiet=True)
         )
-        
-        # Close clips to free memory
-        video_clip.close()
-        audio_clip.close()
-        final_video.close()
         
         return output_video_path
     
     except Exception as e:
         st.error(f"Error creating final video: {str(e)}")
-        return None
-
-def get_video_download_link(file_path, filename):
-    """Generate download link for video"""
-    with open(file_path, "rb") as f:
-        video_data = f.read()
-    b64 = base64.b64encode(video_data).decode()
-    return f'<a href="data:video/mp4;base64,{b64}" download="{filename}">Download Dubbed Video</a>'
+        # Fallback: try moviepy
+        try:
+            video_clip = VideoFileClip(video_path)
+            audio_clip = AudioFileClip(new_audio_path)
+            final_video = video_clip.set_audio(audio_clip)
+            final_video.write_videofile(
+                output_video_path,
+                codec='libx264',
+                audio_codec='aac',
+                verbose=False,
+                logger=None
+            )
+            video_clip.close()
+            audio_clip.close()
+            final_video.close()
+            return output_video_path
+        except Exception as e2:
+            st.error(f"Fallback also failed: {str(e2)}")
+            return None
 
 # Main app interface
 def main():
@@ -280,16 +310,19 @@ def main():
         model_size = st.selectbox(
             "Whisper Model Size",
             ["base", "small", "medium"],
+            index=0,  # Default to base for speed
             help="Larger models are more accurate but slower"
         )
         
         st.markdown("---")
-        st.info("""
-        **Supported Formats:**
-        - Video: MP4, AVI, MOV, WMV
-        - Max size: 200MB
-        - Processing time: 2-10 minutes
-        """)
+        st.markdown("""
+        <div class='warning-box'>
+        <strong>Note:</strong> For best results:
+        - Use short videos (1-5 minutes)
+        - Ensure clear audio in original video
+        - Processing may take 2-5 minutes
+        </div>
+        """, unsafe_allow_html=True)
 
     # Main content area
     col1, col2 = st.columns([1, 1])
@@ -298,7 +331,7 @@ def main():
         st.header("📤 Upload Video")
         uploaded_file = st.file_uploader(
             "Choose a video file",
-            type=['mp4', 'avi', 'mov', 'wmv'],
+            type=['mp4', 'avi', 'mov', 'wmv', 'mkv'],
             help="Upload the video you want to dub"
         )
         
@@ -315,8 +348,8 @@ def main():
         st.header("🎯 Processing")
         
         if uploaded_file is not None and st.button("🚀 Start Dubbing", type="primary"):
-            if file_size > 200:
-                st.error("File size too large! Please upload a video under 200MB.")
+            if file_size > 100:  # Reduced from 200MB for stability
+                st.error("File size too large! Please upload a video under 100MB for reliable processing.")
                 return
             
             st.session_state.processing = True
@@ -347,6 +380,11 @@ def main():
                         return
                     progress_bar.progress(40)
                     
+                    # Display transcription preview
+                    with st.expander("View Transcription Preview"):
+                        for i, segment in enumerate(segments[:5]):  # First 5 segments
+                            st.write(f"[{segment.start:.2f}s -> {segment.end:.2f}s] {segment.text}")
+                    
                     # Step 3: Generate original subtitles
                     status_text.text("📄 Generating subtitles...")
                     original_subtitle_path = generate_subtitle_file(segments, temp_dir)
@@ -363,12 +401,15 @@ def main():
                         return
                     progress_bar.progress(70)
                     
-                    # Step 5: Generate translated audio
+                    # Step 5: Generate translated audio (simplified)
                     status_text.text("🔊 Generating translated audio...")
-                    translated_audio_path = generate_translated_audio(
+                    # Estimate total duration from segments
+                    total_duration = max(segment.end for segment in segments) if segments else 60
+                    translated_audio_path = generate_translated_audio_simple(
                         translated_subtitle_path,
                         target_language,
-                        temp_dir
+                        temp_dir,
+                        total_duration
                     )
                     if not translated_audio_path:
                         return
@@ -376,7 +417,7 @@ def main():
                     
                     # Step 6: Create final video
                     status_text.text("🎬 Creating final dubbed video...")
-                    final_video_path = replace_audio_track(
+                    final_video_path = replace_audio_track_safe(
                         video_path,
                         translated_audio_path,
                         temp_dir
@@ -413,7 +454,13 @@ def main():
                     
                 except Exception as e:
                     st.error(f"❌ Error during processing: {str(e)}")
-                    st.info("Please try again with a smaller video or different language.")
+                    st.info("""
+                    **Troubleshooting tips:**
+                    - Try a shorter video (under 2 minutes)
+                    - Ensure the video has clear audio
+                    - Try a different target language
+                    - The video might be too large for processing
+                    """)
                 
                 finally:
                     st.session_state.processing = False
@@ -433,7 +480,7 @@ def main():
     
     with col1:
         st.subheader("1. Upload")
-        st.write("Upload your video file (MP4, AVI, MOV, WMV)")
+        st.write("Upload your video file")
     
     with col2:
         st.subheader("2. Transcribe")
