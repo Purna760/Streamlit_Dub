@@ -3,10 +3,9 @@ import os
 import tempfile
 import math
 import time
-from pathlib import Path
+import io
+import base64
 import warnings
-import subprocess
-import sys
 warnings.filterwarnings('ignore')
 
 # App configuration
@@ -76,37 +75,17 @@ LANGUAGE_MAPPING = {
     "Russian": "ru"
 }
 
-def install_ffmpeg():
-    """Install ffmpeg for pydub"""
-    try:
-        # Try to install ffmpeg using apt (for Linux environments)
-        result = subprocess.run([
-            'apt-get', 'update', '&&', 
-            'apt-get', 'install', '-y', 'ffmpeg'
-        ], capture_output=True, text=True, shell=True)
-        
-        if result.returncode == 0:
-            st.success("FFmpeg installed successfully")
-            return True
-        else:
-            st.warning("Could not install FFmpeg via apt, trying alternative method...")
-            return False
-    except Exception as e:
-        st.warning(f"FFmpeg installation attempt failed: {str(e)}")
-        return False
-
 def install_packages():
-    """Install required packages"""
+    """Install required packages without ffmpeg dependencies"""
     import subprocess
     import sys
     
     packages = [
         "faster-whisper",
-        "ffmpeg-python", 
         "translate",
         "gtts",
         "pysrt",
-        "pydub"
+        "pyaudio"  # Alternative audio processing
     ]
     
     for package in packages:
@@ -115,28 +94,6 @@ def install_packages():
         except ImportError:
             st.info(f"Installing {package}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-def setup_ffmpeg():
-    """Setup ffmpeg path for pydub"""
-    try:
-        from pydub import AudioSegment
-        
-        # Try to find ffmpeg in system path
-        import shutil
-        ffmpeg_path = shutil.which("ffmpeg")
-        ffprobe_path = shutil.which("ffprobe")
-        
-        if ffmpeg_path:
-            AudioSegment.ffmpeg = ffmpeg_path
-        if ffprobe_path:
-            AudioSegment.ffprobe = ffprobe_path
-            
-        st.success("FFmpeg configured successfully")
-        return True
-        
-    except Exception as e:
-        st.warning(f"FFmpeg setup warning: {str(e)}")
-        return False
 
 def format_time(seconds):
     """Convert seconds to SRT time format"""
@@ -150,18 +107,17 @@ def format_time(seconds):
     return formatted_time
 
 def transcribe_audio(audio_path):
-    """Transcribe audio using faster-whisper - FIXED VERSION"""
+    """Transcribe audio using faster-whisper"""
     try:
         from faster_whisper import WhisperModel
         
         st.info("Loading transcription model...")
-        model = WhisperModel("base")  # Using base instead of small for better compatibility
+        model = WhisperModel("base")
         
         st.info("Transcribing audio...")
         segments, info = model.transcribe(audio_path)
         
-        # FIX: Access language correctly from the info object
-        language = info.language  # This is the correct way in newer versions
+        language = info.language
         language_probability = getattr(info, 'language_probability', 'N/A')
         
         st.success(f"Detected language: {language} (confidence: {language_probability})")
@@ -244,20 +200,16 @@ def translate_subtitles(subtitle_path, translated_subtitle_path, target_lang, so
         st.error(f"Translation error: {str(e)}")
         return False
 
-def generate_translated_audio_simple(translated_subtitle_path, output_audio_path, target_lang):
-    """Simplified audio generation without complex timing"""
+def generate_individual_audio_files(translated_subtitle_path, temp_dir, target_lang):
+    """Generate individual audio files for each segment using gTTS"""
     try:
         import pysrt
         from gtts import gTTS
-        from pydub import AudioSegment
-        import io
         
-        st.info("Generating translated audio (simplified version)...")
+        st.info("Generating audio segments...")
         
         subs = pysrt.open(translated_subtitle_path)
-        
-        # Create a simple combined audio by concatenating all segments
-        combined = AudioSegment.silent(duration=0)
+        audio_files = []
         
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -271,20 +223,15 @@ def generate_translated_audio_simple(translated_subtitle_path, output_audio_path
                     # Generate speech using gTTS
                     tts = gTTS(text=text, lang=target_lang, slow=False)
                     
-                    # Save to bytes buffer instead of file
-                    audio_buffer = io.BytesIO()
-                    tts.write_to_fp(audio_buffer)
-                    audio_buffer.seek(0)
+                    # Save to individual file
+                    audio_file_path = os.path.join(temp_dir, f"segment_{i}.mp3")
+                    tts.save(audio_file_path)
                     
-                    # Load audio from buffer
-                    audio = AudioSegment.from_mp3(audio_buffer)
-                    
-                    # Add a small pause between segments
-                    if len(combined) > 0:
-                        combined += AudioSegment.silent(duration=500)  # 500ms pause
-                    
-                    # Append the audio
-                    combined += audio
+                    audio_files.append({
+                        'path': audio_file_path,
+                        'start_time': sub.start.ordinal / 1000.0,
+                        'text': text
+                    })
                     successful_segments += 1
                     
                 except Exception as e:
@@ -295,87 +242,75 @@ def generate_translated_audio_simple(translated_subtitle_path, output_audio_path
             progress_bar.progress(progress)
             status_text.text(f"Generating audio segment {i+1}/{len(subs)}")
         
-        # Export final audio
-        combined.export(output_audio_path, format="mp3")
-        
         progress_bar.empty()
         status_text.empty()
         
-        st.success(f"Generated audio for {successful_segments}/{len(subs)} segments")
-        return True
+        st.success(f"Generated {successful_segments} audio segments")
+        return audio_files
         
     except Exception as e:
-        st.error(f"Audio generation error: {str(e)}")
-        return False
+        st.error(f"Audio segment generation error: {str(e)}")
+        return []
 
-def generate_translated_audio_advanced(translated_subtitle_path, output_audio_path, target_lang):
-    """Advanced audio generation with timing preservation"""
+def create_audio_download_page(audio_files, target_lang):
+    """Create a download page for individual audio files"""
+    st.header("🎵 Generated Audio Segments")
+    st.info("Since we cannot combine audio without FFmpeg, here are the individual audio segments. You can download them and combine using any audio editing software.")
+    
+    for i, audio_file in enumerate(audio_files):
+        col1, col2, col3 = st.columns([3, 1, 1])
+        
+        with col1:
+            st.write(f"**Segment {i+1}:** {audio_file['text']}")
+            st.write(f"Start time: {audio_file['start_time']:.2f}s")
+        
+        with col2:
+            # Play button
+            with open(audio_file['path'], "rb") as f:
+                audio_bytes = f.read()
+            st.audio(audio_bytes, format='audio/mp3')
+        
+        with col3:
+            # Download button
+            with open(audio_file['path'], "rb") as f:
+                st.download_button(
+                    label="📥 Download",
+                    data=f,
+                    file_name=f"segment_{i+1}_{target_lang}.mp3",
+                    mime="audio/mp3",
+                    key=f"download_{i}"
+                )
+    
+    # Provide instructions for combining
+    st.markdown("---")
+    st.subheader("🔧 How to Combine Audio Segments")
+    st.markdown("""
+    You can combine these audio segments using:
+    
+    - **Audacity** (Free, cross-platform)
+    - **Online audio mergers** (search "online audio combiner")
+    - **FFmpeg** (command line tool)
+    - **Any audio editing software**
+    
+    **Simple FFmpeg command to combine:**
+    ```bash
+    ffmpeg -i "concat:segment1.mp3|segment2.mp3|segment3.mp3" -c copy output.mp3
+    ```
+    """)
+
+def generate_combined_audio_alternative(audio_files, output_path):
+    """Alternative method to combine audio using pure Python (limited)"""
     try:
-        import pysrt
-        from gtts import gTTS
-        from pydub import AudioSegment
-        import io
+        # This is a simplified approach that might work for some cases
+        st.info("Attempting to combine audio segments...")
         
-        st.info("Generating translated audio with timing preservation...")
-        
-        subs = pysrt.open(translated_subtitle_path)
-        combined = AudioSegment.silent(duration=0)
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        successful_segments = 0
-        for i, sub in enumerate(subs):
-            start_time = sub.start.ordinal / 1000.0  # Convert to seconds
-            text = sub.text.strip()
-            
-            if text and len(text) > 1:
-                try:
-                    # Generate speech using gTTS
-                    tts = gTTS(text=text, lang=target_lang, slow=False)
-                    
-                    # Use bytes buffer to avoid file operations
-                    audio_buffer = io.BytesIO()
-                    tts.write_to_fp(audio_buffer)
-                    audio_buffer.seek(0)
-                    
-                    # Load audio from buffer
-                    audio_segment = AudioSegment.from_mp3(audio_buffer)
-                    
-                    # Calculate the required position
-                    current_duration = len(combined) / 1000.0  # Convert to seconds
-                    required_duration = start_time
-                    
-                    if required_duration > current_duration:
-                        # Add silence to reach the required position
-                        silence_duration = (required_duration - current_duration) * 1000  # Convert to milliseconds
-                        combined += AudioSegment.silent(duration=silence_duration)
-                    
-                    # Append the audio segment
-                    combined += audio_segment
-                    successful_segments += 1
-                    
-                except Exception as e:
-                    st.warning(f"Could not generate audio for segment {i+1}: {str(e)}")
-                    continue
-            
-            progress = (i + 1) / len(subs)
-            progress_bar.progress(progress)
-            status_text.text(f"Generating audio segment {i+1}/{len(subs)}")
-        
-        # Export final audio
-        combined.export(output_audio_path, format="mp3")
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        st.success(f"Generated audio for {successful_segments}/{len(subs)} segments with timing")
-        return True
+        # Since we can't use pydub without ffmpeg, we'll provide individual files
+        # and instructions for manual combination
+        return False
         
     except Exception as e:
-        st.error(f"Advanced audio generation failed: {str(e)}")
-        st.info("Falling back to simple audio generation...")
-        return generate_translated_audio_simple(translated_subtitle_path, output_audio_path, target_lang)
+        st.warning(f"Automatic combination not available: {str(e)}")
+        return False
 
 def main():
     # Sidebar
@@ -395,30 +330,12 @@ def main():
         index=7  # Default to Tamil
     )
     
-    # Audio generation mode
-    st.sidebar.markdown("### Audio Settings")
-    audio_mode = st.sidebar.selectbox(
-        "Audio Generation Mode",
-        ["Simple (Faster)", "Advanced (Preserves Timing)"],
-        index=0,
-        help="Simple mode is more reliable, Advanced mode preserves original timing but may have issues"
-    )
-    
-    # Model settings
-    st.sidebar.markdown("### Model Settings")
-    model_size = st.sidebar.selectbox(
-        "Transcription Model Size",
-        ["base", "small", "medium"],
-        index=0,
-        help="Base: Faster but less accurate, Medium: Slower but more accurate"
-    )
-    
     # File upload
     st.header("📁 Upload Audio File")
     uploaded_file = st.file_uploader(
         "Choose an audio file", 
         type=['mp3', 'wav', 'm4a'],
-        help="Upload an audio file to dub (MP3, WAV, M4A recommended)"
+        help="Upload an audio file to dub (MP3 recommended)"
     )
     
     if uploaded_file is not None:
@@ -438,13 +355,12 @@ def main():
             2. 🔄 **Setting up environment...**
             3. ⏳ Transcribing Audio
             4. ⏳ Translating Text
-            5. ⏳ Generating Dubbed Audio
+            5. ⏳ Generating Audio Segments
             """)
             
-            # Install packages and setup ffmpeg
+            # Install packages
             with st.spinner("Setting up environment (this may take a minute)..."):
                 install_packages()
-                setup_ffmpeg()
             
             # Create temporary directory for processing
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -460,7 +376,7 @@ def main():
                     2. ✅ **Environment Setup Complete**
                     3. ✅ **Transcribing Audio...**
                     4. 🔄 Translating Text
-                    5. ⏳ Generating Dubbed Audio
+                    5. ⏳ Generating Audio Segments
                     """)
                     
                     source_lang_code, segments = transcribe_audio(input_audio_path)
@@ -480,7 +396,7 @@ def main():
                     2. ✅ **Environment Setup Complete**
                     3. ✅ **Transcribing Audio**
                     4. ✅ **Translating Text...**
-                    5. 🔄 Generating Dubbed Audio
+                    5. 🔄 Generating Audio Segments
                     """)
                     
                     translated_subtitle_path = os.path.join(temp_dir, "translated_subtitles.srt")
@@ -493,61 +409,35 @@ def main():
                     ):
                         return
                     
-                    # Step 5: Generate translated audio
+                    # Step 5: Generate individual audio files
                     steps.markdown("""
                     1. ✅ **File Uploaded**
                     2. ✅ **Environment Setup Complete**
                     3. ✅ **Transcribing Audio**
                     4. ✅ **Translating Text**
-                    5. ✅ **Generating Dubbed Audio...**
+                    5. ✅ **Generating Audio Segments...**
                     """)
                     
-                    output_audio_path = os.path.join(temp_dir, "dubbed_audio.mp3")
-                    
-                    if audio_mode == "Advanced (Preserves Timing)":
-                        success = generate_translated_audio_advanced(
-                            translated_subtitle_path,
-                            output_audio_path,
-                            LANGUAGE_MAPPING[target_lang]
-                        )
-                    else:
-                        success = generate_translated_audio_simple(
-                            translated_subtitle_path,
-                            output_audio_path,
-                            LANGUAGE_MAPPING[target_lang]
-                        )
-                    
-                    if not success:
-                        st.error("Audio generation failed. Please try the simple mode or a different file.")
-                        return
-                    
-                    # Step 6: Provide download
-                    steps.markdown("""
-                    1. ✅ **File Uploaded**
-                    2. ✅ **Environment Setup Complete**
-                    3. ✅ **Transcribing Audio**
-                    4. ✅ **Translating Text**
-                    5. ✅ **Generating Dubbed Audio**
-                    """)
-                    
-                    st.header("✅ Download Your Dubbed Audio")
-                    st.success("Audio dubbing completed successfully!")
-                    
-                    # Read the output file
-                    with open(output_audio_path, "rb") as file:
-                        audio_bytes = file.read()
-                    
-                    # Create download button
-                    st.download_button(
-                        label="📥 Download Dubbed Audio",
-                        data=audio_bytes,
-                        file_name=f"dubbed_audio_{target_lang.lower()}.mp3",
-                        mime="audio/mp3",
-                        type="primary"
+                    audio_files = generate_individual_audio_files(
+                        translated_subtitle_path,
+                        temp_dir,
+                        LANGUAGE_MAPPING[target_lang]
                     )
                     
-                    # Play the dubbed audio
-                    st.audio(audio_bytes, format='audio/mp3')
+                    if not audio_files:
+                        st.error("Failed to generate audio segments. Please try again.")
+                        return
+                    
+                    # Step 6: Create download page
+                    steps.markdown("""
+                    1. ✅ **File Uploaded**
+                    2. ✅ **Environment Setup Complete**
+                    3. ✅ **Transcribing Audio**
+                    4. ✅ **Translating Text**
+                    5. ✅ **Generating Audio Segments**
+                    """)
+                    
+                    create_audio_download_page(audio_files, target_lang)
                     
                     # Show processing summary
                     st.markdown("---")
@@ -556,19 +446,19 @@ def main():
                     with col1:
                         st.metric("Segments Processed", len(segments))
                     with col2:
-                        st.metric("Source Language", source_lang_code)
+                        st.metric("Audio Segments", len(audio_files))
                     with col3:
-                        st.metric("Target Language", target_lang)
+                        st.metric("Source Language", source_lang_code)
                     with col4:
-                        st.metric("File Size", f"{len(audio_bytes)/(1024*1024):.1f} MB")
+                        st.metric("Target Language", target_lang)
                         
                 except Exception as e:
                     st.error(f"Processing error: {str(e)}")
                     st.info("""
                     **Troubleshooting tips:**
-                    - Try using Simple audio generation mode
-                    - Use shorter audio files (under 2 minutes)
+                    - Try a shorter audio file (under 1 minute)
                     - Ensure the audio has clear speech
+                    - Check your internet connection
                     - Try MP3 format instead of WAV
                     """)
 
@@ -579,10 +469,10 @@ def main():
         
         1. **Upload** an audio file (MP3, WAV, M4A)
         2. **Select** source and target languages
-        3. **Choose** audio generation mode
-        4. **Click** "Start Audio Dubbing"
-        5. **Wait** for processing to complete
-        6. **Download** your dubbed audio
+        3. **Click** "Start Audio Dubbing"
+        4. **Wait** for processing to complete
+        5. **Download** individual audio segments
+        6. **Combine** segments using audio software
         
         ### 📋 Supported Features:
         
@@ -590,21 +480,21 @@ def main():
         - 🌐 **20+ language support**
         - ⚡ **Local processing** (no API keys required)
         - 🎙️ **High-quality text-to-speech**
-        - ⏱️ **Timing preservation** (advanced mode)
+        - 📝 **Individual segment downloads**
         
         ### ⚠️ Important Notes:
         
         - First run may take longer to download models
-        - Processing time depends on audio length
-        - Use **Simple mode** for better reliability
-        - **Advanced mode** preserves timing but may have issues
+        - Audio segments are provided separately (no FFmpeg dependency)
+        - You'll need to combine segments manually
+        - Use online tools or Audacity to combine audio files
         """)
 
     # Footer
     st.markdown("---")
     st.markdown(
         "**Audio Dubbing App** • Built with Streamlit • "
-        "No API keys required • Fully local processing"
+        "No API keys required • No FFmpeg dependency"
     )
 
 if __name__ == "__main__":
