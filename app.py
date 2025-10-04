@@ -85,8 +85,7 @@ def install_packages():
         "translate",
         "gtts",
         "pysrt",
-        "pydub",
-        "moviepy"
+        "pydub"
     ]
     
     for package in packages:
@@ -108,26 +107,37 @@ def format_time(seconds):
     return formatted_time
 
 def transcribe_audio(audio_path):
-    """Transcribe audio using faster-whisper"""
+    """Transcribe audio using faster-whisper - FIXED VERSION"""
     try:
         from faster_whisper import WhisperModel
         
         st.info("Loading transcription model...")
-        model = WhisperModel("small")
+        model = WhisperModel("base")  # Using base instead of small for better compatibility
         
         st.info("Transcribing audio...")
         segments, info = model.transcribe(audio_path)
-        language = info[0]
         
-        st.success(f"Detected language: {language}")
+        # FIX: Access language correctly from the info object
+        language = info.language  # This is the correct way in newer versions
+        language_probability = getattr(info, 'language_probability', 'N/A')
+        
+        st.success(f"Detected language: {language} (confidence: {language_probability})")
         
         segments = list(segments)
         st.write(f"Found {len(segments)} segments")
+        
+        # Display first few segments for verification
+        with st.expander("Preview Transcription Segments"):
+            for i, segment in enumerate(segments[:3]):
+                st.write(f"**Segment {i+1}:** {segment.text}")
+                st.write(f"Time: {segment.start:.2f}s - {segment.end:.2f}s")
+                st.write("---")
         
         return language, segments
         
     except Exception as e:
         st.error(f"Transcription error: {str(e)}")
+        st.info("Try using a different audio file or check the audio format.")
         return None, None
 
 def generate_subtitle_file(segments, subtitle_path):
@@ -145,6 +155,7 @@ def generate_subtitle_file(segments, subtitle_path):
         with open(subtitle_path, "w", encoding="utf-8") as f:
             f.write(text)
         
+        st.success(f"Subtitles generated with {len(segments)} segments")
         return True
         
     except Exception as e:
@@ -165,9 +176,13 @@ def translate_subtitles(subtitle_path, translated_subtitle_path, target_lang, so
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        translated_count = 0
         for i, sub in enumerate(subs):
             try:
-                sub.text = translator.translate(sub.text)
+                translated_text = translator.translate(sub.text)
+                if translated_text:
+                    sub.text = translated_text
+                    translated_count += 1
                 progress = (i + 1) / len(subs)
                 progress_bar.progress(progress)
                 status_text.text(f"Translating segment {i+1}/{len(subs)}")
@@ -175,10 +190,11 @@ def translate_subtitles(subtitle_path, translated_subtitle_path, target_lang, so
                 st.warning(f"Could not translate segment {i+1}: {str(e)}")
                 continue
         
-        subs.save(translated_subtitle_path)
+        subs.save(translated_subtitle_path, encoding='utf-8')
         progress_bar.empty()
         status_text.empty()
         
+        st.success(f"Translated {translated_count}/{len(subs)} segments successfully")
         return True
         
     except Exception as e:
@@ -201,15 +217,16 @@ def generate_translated_audio(translated_subtitle_path, output_audio_path, targe
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        successful_segments = 0
         for i, sub in enumerate(subs):
             start_time = sub.start.ordinal / 1000.0
-            text = sub.text
+            text = sub.text.strip()
             
-            if text.strip():
+            if text and len(text) > 1:  # Only process non-empty text
                 try:
                     # Generate speech using gTTS
                     tts = gTTS(text=text, lang=target_lang, slow=False)
-                    temp_file = "temp_audio.mp3"
+                    temp_file = f"temp_audio_{i}.mp3"
                     tts.save(temp_file)
                     
                     # Load and process audio
@@ -217,13 +234,20 @@ def generate_translated_audio(translated_subtitle_path, output_audio_path, targe
                     
                     # Calculate position to insert audio
                     current_duration = len(combined)
-                    silent_duration = start_time * 1000 - current_duration
+                    target_position = start_time * 1000
                     
-                    if silent_duration > 0:
-                        combined += AudioSegment.silent(duration=silent_duration)
+                    if target_position > current_duration:
+                        # Add silence to fill the gap
+                        silence_duration = target_position - current_duration
+                        combined += AudioSegment.silent(duration=silence_duration)
                     
+                    # Append the audio
                     combined += audio
-                    os.remove(temp_file)
+                    successful_segments += 1
+                    
+                    # Clean up temp file
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
                     
                 except Exception as e:
                     st.warning(f"Could not generate audio for segment {i+1}: {str(e)}")
@@ -239,6 +263,7 @@ def generate_translated_audio(translated_subtitle_path, output_audio_path, targe
         progress_bar.empty()
         status_text.empty()
         
+        st.success(f"Generated audio for {successful_segments}/{len(subs)} segments")
         return True
         
     except Exception as e:
@@ -250,6 +275,7 @@ def main():
     st.sidebar.header("🎛️ Configuration")
     
     # Language selection
+    st.sidebar.markdown("### Language Settings")
     source_lang = st.sidebar.selectbox(
         "Source Language (for translation)",
         list(LANGUAGE_MAPPING.keys()),
@@ -262,22 +288,45 @@ def main():
         index=7  # Default to Tamil
     )
     
+    # Model settings
+    st.sidebar.markdown("### Model Settings")
+    model_size = st.sidebar.selectbox(
+        "Transcription Model Size",
+        ["base", "small", "medium"],
+        index=0,
+        help="Base: Faster but less accurate, Medium: Slower but more accurate"
+    )
+    
     # File upload
     st.header("📁 Upload Audio File")
     uploaded_file = st.file_uploader(
-        "Choose an MP3 audio file", 
+        "Choose an audio file", 
         type=['mp3', 'wav', 'm4a', 'ogg'],
-        help="Upload an audio file to dub"
+        help="Upload an audio file to dub (MP3, WAV, M4A, OGG)"
     )
     
     if uploaded_file is not None:
         # Display file info
-        st.success(f"File uploaded: {uploaded_file.name}")
+        file_size = len(uploaded_file.getvalue()) / (1024 * 1024)  # MB
+        st.success(f"File uploaded: {uploaded_file.name} ({file_size:.2f} MB)")
         st.audio(uploaded_file, format='audio/mp3')
+        
+        # Show processing steps
+        st.markdown("### 🔄 Processing Steps")
+        steps = st.empty()
         
         # Dubbing button
         if st.button("🎙️ Start Audio Dubbing", type="primary"):
-            with st.spinner("Setting up environment..."):
+            steps.markdown("""
+            1. ✅ **File Uploaded**
+            2. 🔄 **Transcribing Audio...**
+            3. ⏳ Translating Text
+            4. ⏳ Generating Dubbed Audio
+            5. ⏳ Finalizing
+            """)
+            
+            # Install packages if needed
+            with st.spinner("Checking dependencies..."):
                 install_packages()
             
             # Create temporary directory for processing
@@ -289,11 +338,18 @@ def main():
                         f.write(uploaded_file.getbuffer())
                     
                     # Step 2: Transcribe audio
-                    st.header("📝 Step 1: Transcription")
+                    steps.markdown("""
+                    1. ✅ **File Uploaded**
+                    2. ✅ **Transcribing Audio...**
+                    3. 🔄 Translating Text
+                    4. ⏳ Generating Dubbed Audio
+                    5. ⏳ Finalizing
+                    """)
+                    
                     source_lang_code, segments = transcribe_audio(input_audio_path)
                     
-                    if segments is None:
-                        st.error("Transcription failed. Please try again.")
+                    if segments is None or len(segments) == 0:
+                        st.error("Transcription failed or no speech detected. Please try again with a different audio file.")
                         return
                     
                     # Step 3: Generate original subtitles
@@ -301,13 +357,15 @@ def main():
                     if not generate_subtitle_file(segments, original_subtitle_path):
                         return
                     
-                    # Display some transcribed segments
-                    with st.expander("View Transcribed Text"):
-                        for i, segment in enumerate(segments[:5]):  # Show first 5 segments
-                            st.write(f"**Segment {i+1}:** {segment.text}")
-                    
                     # Step 4: Translate subtitles
-                    st.header("🌐 Step 2: Translation")
+                    steps.markdown("""
+                    1. ✅ **File Uploaded**
+                    2. ✅ **Transcribing Audio**
+                    3. ✅ **Translating Text...**
+                    4. 🔄 Generating Dubbed Audio
+                    5. ⏳ Finalizing
+                    """)
+                    
                     translated_subtitle_path = os.path.join(temp_dir, "translated_subtitles.srt")
                     
                     if not translate_subtitles(
@@ -319,7 +377,14 @@ def main():
                         return
                     
                     # Step 5: Generate translated audio
-                    st.header("🎙️ Step 3: Audio Generation")
+                    steps.markdown("""
+                    1. ✅ **File Uploaded**
+                    2. ✅ **Transcribing Audio**
+                    3. ✅ **Translating Text**
+                    4. ✅ **Generating Dubbed Audio...**
+                    5. 🔄 Finalizing
+                    """)
+                    
                     output_audio_path = os.path.join(temp_dir, "dubbed_audio.mp3")
                     
                     if not generate_translated_audio(
@@ -330,7 +395,15 @@ def main():
                         return
                     
                     # Step 6: Provide download
-                    st.header("✅ Step 4: Download")
+                    steps.markdown("""
+                    1. ✅ **File Uploaded**
+                    2. ✅ **Transcribing Audio**
+                    3. ✅ **Translating Text**
+                    4. ✅ **Generating Dubbed Audio**
+                    5. ✅ **Finalizing**
+                    """)
+                    
+                    st.header("✅ Download Your Dubbed Audio")
                     st.success("Audio dubbing completed successfully!")
                     
                     # Read the output file
@@ -342,7 +415,8 @@ def main():
                         label="📥 Download Dubbed Audio",
                         data=audio_bytes,
                         file_name=f"dubbed_audio_{target_lang.lower()}.mp3",
-                        mime="audio/mp3"
+                        mime="audio/mp3",
+                        type="primary"
                     )
                     
                     # Play the dubbed audio
@@ -351,24 +425,32 @@ def main():
                     # Show processing summary
                     st.markdown("---")
                     st.subheader("📊 Processing Summary")
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("Segments Processed", len(segments))
                     with col2:
                         st.metric("Source Language", source_lang_code)
                     with col3:
                         st.metric("Target Language", target_lang)
+                    with col4:
+                        st.metric("File Size", f"{len(audio_bytes)/(1024*1024):.1f} MB")
                         
                 except Exception as e:
                     st.error(f"Processing error: {str(e)}")
-                    st.info("Please try again with a different audio file.")
+                    st.info("""
+                    **Troubleshooting tips:**
+                    - Try a shorter audio file
+                    - Ensure the audio has clear speech
+                    - Check your internet connection (for package downloads)
+                    - Try a different audio format
+                    """)
 
     else:
         # Instructions
         st.markdown("""
         ### 🚀 How to use this app:
         
-        1. **Upload** an MP3 audio file
+        1. **Upload** an audio file (MP3, WAV, M4A, OGG)
         2. **Select** source and target languages
         3. **Click** "Start Audio Dubbing"
         4. **Wait** for processing to complete
@@ -377,16 +459,17 @@ def main():
         ### 📋 Supported Features:
         
         - 🎵 **Audio file upload** (MP3, WAV, M4A, OGG)
-        - 🌐 **Multiple language support**
+        - 🌐 **20+ language support**
         - ⚡ **Local processing** (no API keys required)
         - 🎙️ **High-quality text-to-speech**
         - ⏱️ **Automatic timing preservation**
         
-        ### 🗣️ Supported Languages:
+        ### ⚠️ Important Notes:
         
-        - **European**: English, Spanish, French, German, Italian, Portuguese
-        - **Indian**: Hindi, Tamil, Telugu, Malayalam, Kannada, Bengali, Marathi, Gujarati, Punjabi
-        - **Asian**: Japanese, Korean, Chinese, Arabic, Russian
+        - First run may take longer to download models
+        - Processing time depends on audio length
+        - Internet required for package installation
+        - Large files may take more time to process
         """)
 
     # Footer
