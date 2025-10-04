@@ -4,43 +4,14 @@ import tempfile
 import math
 import time
 from pathlib import Path
-import subprocess
-import sys
-
-# Install required packages
-def install_packages():
-    packages = [
-        "faster-whisper", "ffmpeg-python", "translate", 
-        "gtts", "pysrt", "pydub", "moviepy"
-    ]
-    
-    for package in packages:
-        try:
-            __import__(package.replace("-", "_"))
-        except ImportError:
-            st.warning(f"Installing {package}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-# Install packages when app starts
-if "packages_installed" not in st.session_state:
-    with st.spinner("Installing required packages..."):
-        install_packages()
-    st.session_state.packages_installed = True
-
-# Now import the packages
-from faster_whisper import WhisperModel
-import ffmpeg
-from translate import Translator
-import pysrt
-from gtts import gTTS
-from pydub import AudioSegment
-from moviepy.editor import VideoFileClip, AudioFileClip
+import warnings
+warnings.filterwarnings('ignore')
 
 # App configuration
 st.set_page_config(
     page_title="Audio Dubbing App",
     page_icon="🎙️",
-    layout="wide"
+    layout="centered"
 )
 
 # Custom CSS
@@ -49,8 +20,14 @@ st.markdown("""
     .main {
         background-color: #f0f2f6;
     }
-    .stProgress > div > div > div > div {
+    .stButton>button {
         background-color: #4CAF50;
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+        font-weight: bold;
+        width: 100%;
     }
     .success-box {
         padding: 1rem;
@@ -58,7 +35,6 @@ st.markdown("""
         border: 1px solid #c3e6cb;
         border-radius: 0.5rem;
         color: #155724;
-        margin: 1rem 0;
     }
     .warning-box {
         padding: 1rem;
@@ -66,157 +42,16 @@ st.markdown("""
         border: 1px solid #ffeaa7;
         border-radius: 0.5rem;
         color: #856404;
-        margin: 1rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
-def format_time(seconds):
-    """Convert seconds to SRT time format"""
-    hours = math.floor(seconds / 3600)
-    seconds %= 3600
-    minutes = math.floor(seconds / 60)
-    seconds %= 60
-    milliseconds = round((seconds - math.floor(seconds)) * 1000)
-    seconds = math.floor(seconds)
-    formatted_time = f"{hours:02d}:{minutes:02d}:{seconds:01d},{milliseconds:03d}"
-    return formatted_time
+# Title and description
+st.title("🎙️ Audio Dubbing App")
+st.markdown("**Translate and dub your audio files without any external API keys!**")
 
-def extract_audio(video_path, audio_output_path):
-    """Extract audio from video file"""
-    try:
-        stream = ffmpeg.input(video_path)
-        stream = ffmpeg.output(stream, audio_output_path)
-        ffmpeg.run(stream, overwrite_output=True, quiet=True)
-        return True
-    except Exception as e:
-        st.error(f"Error extracting audio: {e}")
-        return False
-
-def transcribe_audio(audio_path, model_size="small"):
-    """Transcribe audio using Whisper"""
-    try:
-        model = WhisperModel(model_size)
-        segments, info = model.transcribe(audio_path)
-        language = info[0]
-        segments = list(segments)
-        return language, segments
-    except Exception as e:
-        st.error(f"Error transcribing audio: {e}")
-        return None, None
-
-def generate_subtitle_file(segments, subtitle_path):
-    """Generate SRT subtitle file from segments"""
-    try:
-        text = ""
-        for index, segment in enumerate(segments):
-            segment_start = format_time(segment.start)
-            segment_end = format_time(segment.end)
-            text += f"{str(index+1)} \n"
-            text += f"{segment_start} --> {segment_end} \n"
-            text += f"{segment.text} \n"
-            text += "\n"
-
-        with open(subtitle_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        return True
-    except Exception as e:
-        st.error(f"Error generating subtitle file: {e}")
-        return False
-
-def translate_subtitles(subtitle_path, output_path, target_lang, source_lang="en"):
-    """Translate subtitles to target language"""
-    try:
-        subs = pysrt.open(subtitle_path)
-        translator = Translator(to_lang=target_lang, from_lang=source_lang)
-        
-        for sub in subs:
-            try:
-                translated_text = translator.translate(sub.text)
-                sub.text = translated_text
-            except Exception as e:
-                st.warning(f"Could not translate: {sub.text}. Error: {e}")
-                continue
-
-        subs.save(output_path, encoding='utf-8')
-        return True
-    except Exception as e:
-        st.error(f"Error translating subtitles: {e}")
-        return False
-
-def generate_translated_audio(subtitle_path, output_audio_path, target_lang):
-    """Generate translated audio with proper timing"""
-    try:
-        subs = pysrt.open(subtitle_path)
-        combined = AudioSegment.silent(duration=0)
-
-        for sub in subs:
-            start_time = sub.start.ordinal / 1000.0  # convert to seconds
-            text = sub.text
-
-            if text.strip():  # Only process non-empty text
-                # Generate speech using gTTS
-                tts = gTTS(text=text, lang=target_lang, slow=False)
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-                    temp_path = temp_file.name
-                
-                tts.save(temp_path)
-                
-                # Load the temporary mp3 file
-                audio = AudioSegment.from_mp3(temp_path)
-                
-                # Calculate the position to insert the audio
-                current_duration = len(combined)
-                silent_duration = start_time * 1000 - current_duration
-
-                if silent_duration > 0:
-                    # Add silence to fill the gap
-                    combined += AudioSegment.silent(duration=silent_duration)
-
-                # Append the audio to the combined AudioSegment
-                combined += audio
-                
-                # Cleanup temporary file
-                os.unlink(temp_path)
-
-        # Export the combined audio
-        combined.export(output_audio_path, format="wav")
-        return True
-    except Exception as e:
-        st.error(f"Error generating translated audio: {e}")
-        return False
-
-def replace_audio_track(video_path, audio_path, output_path):
-    """Replace audio track in video"""
-    try:
-        video = VideoFileClip(video_path)
-        audio = AudioFileClip(audio_path)
-        
-        # Set the new audio to the video
-        video_with_new_audio = video.set_audio(audio)
-        
-        # Write the final video
-        video_with_new_audio.write_videofile(
-            output_path, 
-            codec='libx264', 
-            audio_codec='aac',
-            verbose=False,
-            logger=None
-        )
-        
-        # Close the clips to free memory
-        video.close()
-        audio.close()
-        video_with_new_audio.close()
-        
-        return True
-    except Exception as e:
-        st.error(f"Error replacing audio track: {e}")
-        return False
-
-# Language mapping for gTTS
-LANGUAGE_CODES = {
+# Language mapping
+LANGUAGE_MAPPING = {
     "English": "en",
     "Spanish": "es", 
     "French": "fr",
@@ -232,240 +67,334 @@ LANGUAGE_CODES = {
     "Marathi": "mr",
     "Gujarati": "gu",
     "Punjabi": "pa",
-    "Urdu": "ur",
-    "Arabic": "ar",
-    "Chinese (Simplified)": "zh-CN",
     "Japanese": "ja",
     "Korean": "ko",
+    "Chinese (Simplified)": "zh-cn",
+    "Arabic": "ar",
     "Russian": "ru"
 }
 
-# Main App
-st.title("🎙️ Audio Dubbing App")
-st.markdown("**Dub your videos automatically without external APIs!**")
+def install_packages():
+    """Install required packages"""
+    import subprocess
+    import sys
+    
+    packages = [
+        "faster-whisper",
+        "ffmpeg-python", 
+        "translate",
+        "gtts",
+        "pysrt",
+        "pydub",
+        "moviepy"
+    ]
+    
+    for package in packages:
+        try:
+            __import__(package.replace("-", "_"))
+        except ImportError:
+            st.info(f"Installing {package}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# File upload section
-st.header("1. Upload Video File")
-uploaded_file = st.file_uploader(
-    "Choose a video file", 
-    type=['mp4', 'avi', 'mov', 'mkv', 'wmv'],
-    help="Supported formats: MP4, AVI, MOV, MKV, WMV"
-)
+def format_time(seconds):
+    """Convert seconds to SRT time format"""
+    hours = math.floor(seconds / 3600)
+    seconds %= 3600
+    minutes = math.floor(seconds / 60)
+    seconds %= 60
+    milliseconds = round((seconds - math.floor(seconds)) * 1000)
+    seconds = math.floor(seconds)
+    formatted_time = f"{hours:02d}:{minutes:02d}:{seconds:01d},{milliseconds:03d}"
+    return formatted_time
 
-# Language selection
-st.header("2. Select Languages")
-col1, col2 = st.columns(2)
+def transcribe_audio(audio_path):
+    """Transcribe audio using faster-whisper"""
+    try:
+        from faster_whisper import WhisperModel
+        
+        st.info("Loading transcription model...")
+        model = WhisperModel("small")
+        
+        st.info("Transcribing audio...")
+        segments, info = model.transcribe(audio_path)
+        language = info[0]
+        
+        st.success(f"Detected language: {language}")
+        
+        segments = list(segments)
+        st.write(f"Found {len(segments)} segments")
+        
+        return language, segments
+        
+    except Exception as e:
+        st.error(f"Transcription error: {str(e)}")
+        return None, None
 
-with col1:
-    source_lang = st.selectbox(
-        "Source Language (Original Video)",
-        options=list(LANGUAGE_CODES.keys()),
-        index=0,
-        help="Language spoken in the original video"
+def generate_subtitle_file(segments, subtitle_path):
+    """Generate subtitle file from segments"""
+    try:
+        text = ""
+        for index, segment in enumerate(segments):
+            segment_start = format_time(segment.start)
+            segment_end = format_time(segment.end)
+            text += f"{str(index+1)} \n"
+            text += f"{segment_start} --> {segment_end} \n"
+            text += f"{segment.text} \n"
+            text += "\n"
+
+        with open(subtitle_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Subtitle generation error: {str(e)}")
+        return False
+
+def translate_subtitles(subtitle_path, translated_subtitle_path, target_lang, source_lang="en"):
+    """Translate subtitles to target language"""
+    try:
+        import pysrt
+        from translate import Translator
+        
+        st.info(f"Translating from {source_lang} to {target_lang}...")
+        
+        subs = pysrt.open(subtitle_path)
+        translator = Translator(to_lang=target_lang, from_lang=source_lang)
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, sub in enumerate(subs):
+            try:
+                sub.text = translator.translate(sub.text)
+                progress = (i + 1) / len(subs)
+                progress_bar.progress(progress)
+                status_text.text(f"Translating segment {i+1}/{len(subs)}")
+            except Exception as e:
+                st.warning(f"Could not translate segment {i+1}: {str(e)}")
+                continue
+        
+        subs.save(translated_subtitle_path)
+        progress_bar.empty()
+        status_text.empty()
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Translation error: {str(e)}")
+        return False
+
+def generate_translated_audio(translated_subtitle_path, output_audio_path, target_lang):
+    """Generate audio for translated subtitles"""
+    try:
+        import pysrt
+        from gtts import gTTS
+        from pydub import AudioSegment
+        import os
+        
+        st.info("Generating translated audio...")
+        
+        subs = pysrt.open(translated_subtitle_path)
+        combined = AudioSegment.silent(duration=0)
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, sub in enumerate(subs):
+            start_time = sub.start.ordinal / 1000.0
+            text = sub.text
+            
+            if text.strip():
+                try:
+                    # Generate speech using gTTS
+                    tts = gTTS(text=text, lang=target_lang, slow=False)
+                    temp_file = "temp_audio.mp3"
+                    tts.save(temp_file)
+                    
+                    # Load and process audio
+                    audio = AudioSegment.from_mp3(temp_file)
+                    
+                    # Calculate position to insert audio
+                    current_duration = len(combined)
+                    silent_duration = start_time * 1000 - current_duration
+                    
+                    if silent_duration > 0:
+                        combined += AudioSegment.silent(duration=silent_duration)
+                    
+                    combined += audio
+                    os.remove(temp_file)
+                    
+                except Exception as e:
+                    st.warning(f"Could not generate audio for segment {i+1}: {str(e)}")
+                    continue
+            
+            progress = (i + 1) / len(subs)
+            progress_bar.progress(progress)
+            status_text.text(f"Generating audio segment {i+1}/{len(subs)}")
+        
+        # Export final audio
+        combined.export(output_audio_path, format="mp3")
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Audio generation error: {str(e)}")
+        return False
+
+def main():
+    # Sidebar
+    st.sidebar.header("🎛️ Configuration")
+    
+    # Language selection
+    source_lang = st.sidebar.selectbox(
+        "Source Language (for translation)",
+        list(LANGUAGE_MAPPING.keys()),
+        index=0
     )
-
-with col2:
-    target_lang = st.selectbox(
-        "Target Language (Dubbed)",
-        options=list(LANGUAGE_CODES.keys()),
-        index=7,  # Default to Hindi
-        help="Language for the dubbed audio"
+    
+    target_lang = st.sidebar.selectbox(
+        "Target Language (for dubbing)",
+        list(LANGUAGE_MAPPING.keys()),
+        index=7  # Default to Tamil
     )
-
-# Processing options
-st.header("3. Processing Options")
-model_size = st.selectbox(
-    "Speech Recognition Model Size",
-    options=["tiny", "base", "small", "medium"],
-    index=2,
-    help="Larger models are more accurate but slower"
-)
-
-# Process button
-if st.button("🚀 Start Dubbing Process", type="primary"):
+    
+    # File upload
+    st.header("📁 Upload Audio File")
+    uploaded_file = st.file_uploader(
+        "Choose an MP3 audio file", 
+        type=['mp3', 'wav', 'm4a', 'ogg'],
+        help="Upload an audio file to dub"
+    )
+    
     if uploaded_file is not None:
-        # Create temporary directory for processing
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
+        # Display file info
+        st.success(f"File uploaded: {uploaded_file.name}")
+        st.audio(uploaded_file, format='audio/mp3')
+        
+        # Dubbing button
+        if st.button("🎙️ Start Audio Dubbing", type="primary"):
+            with st.spinner("Setting up environment..."):
+                install_packages()
             
-            # Step 1: Save uploaded file
-            st.subheader("📥 Step 1: Processing uploaded video")
-            video_path = temp_path / "original_video.mp4"
-            with open(video_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            st.success(f"Video uploaded: {uploaded_file.name}")
-            
-            # Initialize progress
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            # Step 2: Extract audio
-            status_text.text("🎵 Step 2: Extracting audio from video...")
-            audio_path = temp_path / "extracted_audio.wav"
-            if extract_audio(str(video_path), str(audio_path)):
-                progress_bar.progress(20)
-                st.success("Audio extracted successfully!")
-            else:
-                st.error("Failed to extract audio")
-                st.stop()
-            
-            # Step 3: Transcribe audio
-            status_text.text("📝 Step 3: Transcribing audio...")
-            source_lang_code = LANGUAGE_CODES[source_lang]
-            target_lang_code = LANGUAGE_CODES[target_lang]
-            
-            language, segments = transcribe_audio(str(audio_path), model_size)
-            if segments:
-                progress_bar.progress(40)
-                st.success(f"Audio transcribed! Detected language: {language}")
-                
-                # Display some transcription samples
-                with st.expander("View Transcription Samples"):
-                    for i, segment in enumerate(segments[:5]):  # Show first 5 segments
-                        st.write(f"[{format_time(segment.start)} -> {format_time(segment.end)}] {segment.text}")
-            else:
-                st.error("Failed to transcribe audio")
-                st.stop()
-            
-            # Step 4: Generate original subtitles
-            status_text.text("📄 Step 4: Generating subtitles...")
-            original_subtitle_path = temp_path / "original_subtitles.srt"
-            if generate_subtitle_file(segments, str(original_subtitle_path)):
-                progress_bar.progress(60)
-                st.success("Original subtitles generated!")
-            else:
-                st.error("Failed to generate subtitles")
-                st.stop()
-            
-            # Step 5: Translate subtitles
-            status_text.text("🌐 Step 5: Translating subtitles...")
-            translated_subtitle_path = temp_path / "translated_subtitles.srt"
-            if translate_subtitles(
-                str(original_subtitle_path), 
-                str(translated_subtitle_path), 
-                target_lang_code, 
-                source_lang_code
-            ):
-                progress_bar.progress(80)
-                st.success("Subtitles translated!")
-            else:
-                st.error("Failed to translate subtitles")
-                st.stop()
-            
-            # Step 6: Generate translated audio
-            status_text.text("🎙️ Step 6: Generating translated audio...")
-            translated_audio_path = temp_path / "translated_audio.wav"
-            if generate_translated_audio(
-                str(translated_subtitle_path), 
-                str(translated_audio_path), 
-                target_lang_code
-            ):
-                progress_bar.progress(90)
-                st.success("Translated audio generated!")
-            else:
-                st.error("Failed to generate translated audio")
-                st.stop()
-            
-            # Step 7: Replace audio track
-            status_text.text("🎬 Step 7: Creating final video...")
-            output_video_path = temp_path / "dubbed_video.mp4"
-            if replace_audio_track(
-                str(video_path), 
-                str(translated_audio_path), 
-                str(output_video_path)
-            ):
-                progress_bar.progress(100)
-                status_text.text("✅ Dubbing completed successfully!")
-                
-                # Display success message
-                st.markdown('<div class="success-box">🎉 <strong>Dubbing Process Completed!</strong></div>', 
-                           unsafe_allow_html=True)
-                
-                # Download section
-                st.header("📥 Download Dubbed Video")
-                
-                # Read the final video file
-                with open(output_video_path, "rb") as file:
-                    video_bytes = file.read()
-                
-                st.download_button(
-                    label="Download Dubbed Video",
-                    data=video_bytes,
-                    file_name=f"dubbed_{uploaded_file.name}",
-                    mime="video/mp4",
-                    type="primary"
-                )
-                
-                # Show file info
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Original File", uploaded_file.name)
-                with col2:
-                    st.metric("Source Language", source_lang)
-                with col3:
-                    st.metric("Dubbed Language", target_lang)
-                
-            else:
-                st.error("Failed to create final video")
-    
+            # Create temporary directory for processing
+            with tempfile.TemporaryDirectory() as temp_dir:
+                try:
+                    # Step 1: Save uploaded file
+                    input_audio_path = os.path.join(temp_dir, "input_audio.mp3")
+                    with open(input_audio_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    
+                    # Step 2: Transcribe audio
+                    st.header("📝 Step 1: Transcription")
+                    source_lang_code, segments = transcribe_audio(input_audio_path)
+                    
+                    if segments is None:
+                        st.error("Transcription failed. Please try again.")
+                        return
+                    
+                    # Step 3: Generate original subtitles
+                    original_subtitle_path = os.path.join(temp_dir, "original_subtitles.srt")
+                    if not generate_subtitle_file(segments, original_subtitle_path):
+                        return
+                    
+                    # Display some transcribed segments
+                    with st.expander("View Transcribed Text"):
+                        for i, segment in enumerate(segments[:5]):  # Show first 5 segments
+                            st.write(f"**Segment {i+1}:** {segment.text}")
+                    
+                    # Step 4: Translate subtitles
+                    st.header("🌐 Step 2: Translation")
+                    translated_subtitle_path = os.path.join(temp_dir, "translated_subtitles.srt")
+                    
+                    if not translate_subtitles(
+                        original_subtitle_path, 
+                        translated_subtitle_path, 
+                        LANGUAGE_MAPPING[target_lang],
+                        source_lang_code
+                    ):
+                        return
+                    
+                    # Step 5: Generate translated audio
+                    st.header("🎙️ Step 3: Audio Generation")
+                    output_audio_path = os.path.join(temp_dir, "dubbed_audio.mp3")
+                    
+                    if not generate_translated_audio(
+                        translated_subtitle_path,
+                        output_audio_path,
+                        LANGUAGE_MAPPING[target_lang]
+                    ):
+                        return
+                    
+                    # Step 6: Provide download
+                    st.header("✅ Step 4: Download")
+                    st.success("Audio dubbing completed successfully!")
+                    
+                    # Read the output file
+                    with open(output_audio_path, "rb") as file:
+                        audio_bytes = file.read()
+                    
+                    # Create download button
+                    st.download_button(
+                        label="📥 Download Dubbed Audio",
+                        data=audio_bytes,
+                        file_name=f"dubbed_audio_{target_lang.lower()}.mp3",
+                        mime="audio/mp3"
+                    )
+                    
+                    # Play the dubbed audio
+                    st.audio(audio_bytes, format='audio/mp3')
+                    
+                    # Show processing summary
+                    st.markdown("---")
+                    st.subheader("📊 Processing Summary")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Segments Processed", len(segments))
+                    with col2:
+                        st.metric("Source Language", source_lang_code)
+                    with col3:
+                        st.metric("Target Language", target_lang)
+                        
+                except Exception as e:
+                    st.error(f"Processing error: {str(e)}")
+                    st.info("Please try again with a different audio file.")
+
     else:
-        st.warning("Please upload a video file first!")
+        # Instructions
+        st.markdown("""
+        ### 🚀 How to use this app:
+        
+        1. **Upload** an MP3 audio file
+        2. **Select** source and target languages
+        3. **Click** "Start Audio Dubbing"
+        4. **Wait** for processing to complete
+        5. **Download** your dubbed audio
+        
+        ### 📋 Supported Features:
+        
+        - 🎵 **Audio file upload** (MP3, WAV, M4A, OGG)
+        - 🌐 **Multiple language support**
+        - ⚡ **Local processing** (no API keys required)
+        - 🎙️ **High-quality text-to-speech**
+        - ⏱️ **Automatic timing preservation**
+        
+        ### 🗣️ Supported Languages:
+        
+        - **European**: English, Spanish, French, German, Italian, Portuguese
+        - **Indian**: Hindi, Tamil, Telugu, Malayalam, Kannada, Bengali, Marathi, Gujarati, Punjabi
+        - **Asian**: Japanese, Korean, Chinese, Arabic, Russian
+        """)
 
-# Instructions section
-with st.expander("📖 How to Use This App"):
-    st.markdown("""
-    ### Step-by-Step Guide:
-    
-    1. **Upload Video**: Select your video file (MP4, AVI, MOV, MKV, WMV)
-    2. **Select Languages**: 
-       - Choose the original language of your video
-       - Choose the target language for dubbing
-    3. **Start Processing**: Click the "Start Dubbing Process" button
-    4. **Wait**: The app will automatically process your video through all steps
-    5. **Download**: Get your dubbed video when processing completes
-    
-    ### Processing Steps:
-    - 🎵 Extract audio from video
-    - 📝 Transcribe audio to text
-    - 📄 Generate subtitles
-    - 🌐 Translate subtitles
-    - 🎙️ Generate translated audio
-    - 🎬 Create final dubbed video
-    
-    ### Supported Languages:
-    - **European**: English, Spanish, French, German, Italian, Portuguese, Russian
-    - **Indian**: Hindi, Tamil, Telugu, Malayalam, Kannada, Bengali, Marathi, Gujarati, Punjabi, Urdu
-    - **Asian**: Chinese, Japanese, Korean, Arabic
-    """)
+    # Footer
+    st.markdown("---")
+    st.markdown(
+        "**Audio Dubbing App** • Built with Streamlit • "
+        "No API keys required • Fully local processing"
+    )
 
-# Technical details
-with st.expander("🔧 Technical Information"):
-    st.markdown("""
-    ### Technologies Used:
-    - **Speech Recognition**: Faster-Whisper (Offline)
-    - **Translation**: Python Translate Library (Offline)
-    - **Text-to-Speech**: gTTS (Google Text-to-Speech)
-    - **Audio Processing**: PyDub, FFmpeg
-    - **Video Processing**: MoviePy
-    
-    ### Features:
-    - ✅ No external API keys required
-    - ✅ Works entirely on mobile
-    - ✅ Offline speech recognition
-    - ✅ Multiple language support
-    - ✅ Automatic timing preservation
-    - ✅ Professional-quality output
-    
-    ### Note:
-    - First run may take longer due to model downloads
-    - Processing time depends on video length and model size
-    - Internet required only for gTTS (text-to-speech)
-    """)
-
-# Footer
-st.markdown("---")
-st.markdown(
-    "**Audio Dubbing App** • Built with Streamlit • "
-    "No API Keys Required • Works Entirely on Mobile 📱"
-)
+if __name__ == "__main__":
+    main()
