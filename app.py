@@ -4,7 +4,6 @@ import tempfile
 import math
 import time
 import io
-import base64
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -44,6 +43,13 @@ st.markdown("""
         border-radius: 0.5rem;
         color: #856404;
     }
+    .error-box {
+        padding: 1rem;
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 0.5rem;
+        color: #721c24;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -75,25 +81,24 @@ LANGUAGE_MAPPING = {
     "Russian": "ru"
 }
 
-def install_packages():
-    """Install required packages without ffmpeg dependencies"""
-    import subprocess
-    import sys
+def check_dependencies():
+    """Check if all required packages are available"""
+    missing_packages = []
     
-    packages = [
-        "faster-whisper",
-        "translate",
-        "gtts",
-        "pysrt",
-        "pyaudio"  # Alternative audio processing
-    ]
+    required_packages = {
+        "faster-whisper": "faster_whisper",
+        "translate": "translate",
+        "gtts": "gtts",
+        "pysrt": "pysrt"
+    }
     
-    for package in packages:
+    for package, import_name in required_packages.items():
         try:
-            __import__(package.replace("-", "_"))
+            __import__(import_name)
         except ImportError:
-            st.info(f"Installing {package}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            missing_packages.append(package)
+    
+    return missing_packages
 
 def format_time(seconds):
     """Convert seconds to SRT time format"""
@@ -230,7 +235,8 @@ def generate_individual_audio_files(translated_subtitle_path, temp_dir, target_l
                     audio_files.append({
                         'path': audio_file_path,
                         'start_time': sub.start.ordinal / 1000.0,
-                        'text': text
+                        'text': text,
+                        'index': i
                     })
                     successful_segments += 1
                     
@@ -255,13 +261,40 @@ def generate_individual_audio_files(translated_subtitle_path, temp_dir, target_l
 def create_audio_download_page(audio_files, target_lang):
     """Create a download page for individual audio files"""
     st.header("🎵 Generated Audio Segments")
-    st.info("Since we cannot combine audio without FFmpeg, here are the individual audio segments. You can download them and combine using any audio editing software.")
+    st.info("""
+    **Download individual audio segments below.** 
+    You can combine them using free online tools like AudioJoiner.com or desktop software like Audacity.
+    """)
     
-    for i, audio_file in enumerate(audio_files):
+    # Create a zip file with all segments
+    import zipfile
+    
+    zip_path = os.path.join(tempfile.gettempdir(), f"audio_segments_{target_lang}.zip")
+    
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for audio_file in audio_files:
+            zipf.write(audio_file['path'], os.path.basename(audio_file['path']))
+    
+    # Download all segments as zip
+    with open(zip_path, "rb") as f:
+        zip_data = f.read()
+    
+    st.download_button(
+        label="📦 Download All Segments (ZIP)",
+        data=zip_data,
+        file_name=f"audio_segments_{target_lang}.zip",
+        mime="application/zip",
+        type="primary"
+    )
+    
+    st.markdown("---")
+    
+    # Individual segment downloads
+    for audio_file in audio_files:
         col1, col2, col3 = st.columns([3, 1, 1])
         
         with col1:
-            st.write(f"**Segment {i+1}:** {audio_file['text']}")
+            st.write(f"**Segment {audio_file['index'] + 1}:** {audio_file['text']}")
             st.write(f"Start time: {audio_file['start_time']:.2f}s")
         
         with col2:
@@ -276,43 +309,59 @@ def create_audio_download_page(audio_files, target_lang):
                 st.download_button(
                     label="📥 Download",
                     data=f,
-                    file_name=f"segment_{i+1}_{target_lang}.mp3",
+                    file_name=f"segment_{audio_file['index'] + 1}_{target_lang}.mp3",
                     mime="audio/mp3",
-                    key=f"download_{i}"
+                    key=f"download_{audio_file['index']}"
                 )
     
     # Provide instructions for combining
     st.markdown("---")
     st.subheader("🔧 How to Combine Audio Segments")
     st.markdown("""
-    You can combine these audio segments using:
+    **Easy Online Tools:**
+    - [AudioJoiner.com](https://audio-joiner.com/) - Free, no installation needed
+    - [MP3Cut.net](https://mp3cut.net/) - Browser-based audio editor
+    - [BearAudio.com](https://bearaudio.com/) - Online audio combiner
     
-    - **Audacity** (Free, cross-platform)
-    - **Online audio mergers** (search "online audio combiner")
-    - **FFmpeg** (command line tool)
-    - **Any audio editing software**
-    
-    **Simple FFmpeg command to combine:**
+    **Desktop Software:**
+    - **Audacity** (Free, cross-platform) - Professional audio editor
+    - **FFmpeg** (command line) - Use this command:
     ```bash
-    ffmpeg -i "concat:segment1.mp3|segment2.mp3|segment3.mp3" -c copy output.mp3
+    ffmpeg -i "concat:segment_0.mp3|segment_1.mp3|segment_2.mp3" -c copy combined.mp3
     ```
+    
+    **Mobile Apps:**
+    - **Audio Evolution Mobile** (Android/iOS)
+    - **BandLab** (Android/iOS) - Free music studio
     """)
 
-def generate_combined_audio_alternative(audio_files, output_path):
-    """Alternative method to combine audio using pure Python (limited)"""
-    try:
-        # This is a simplified approach that might work for some cases
-        st.info("Attempting to combine audio segments...")
-        
-        # Since we can't use pydub without ffmpeg, we'll provide individual files
-        # and instructions for manual combination
-        return False
-        
-    except Exception as e:
-        st.warning(f"Automatic combination not available: {str(e)}")
-        return False
-
 def main():
+    # Check dependencies first
+    missing_packages = check_dependencies()
+    
+    if missing_packages:
+        st.error("🚨 Missing Required Packages")
+        st.markdown(f"""
+        <div class="error-box">
+        <h4>Required packages are missing:</h4>
+        <ul>
+            {''.join([f'<li><code>{pkg}</code></li>' for pkg in missing_packages])}
+        </ul>
+        <p>Please add these to your <code>requirements.txt</code> file and redeploy the app.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+        ### 📋 Required packages for `requirements.txt`:
+        ```txt
+        faster-whisper>=0.9.0
+        translate>=3.6.1
+        gtts>=2.3.2
+        pysrt>=1.1.2
+        ```
+        """)
+        return
+
     # Sidebar
     st.sidebar.header("🎛️ Configuration")
     
@@ -352,15 +401,11 @@ def main():
         if st.button("🎙️ Start Audio Dubbing", type="primary"):
             steps.markdown("""
             1. ✅ **File Uploaded**
-            2. 🔄 **Setting up environment...**
+            2. ✅ **Dependencies Checked**
             3. ⏳ Transcribing Audio
             4. ⏳ Translating Text
             5. ⏳ Generating Audio Segments
             """)
-            
-            # Install packages
-            with st.spinner("Setting up environment (this may take a minute)..."):
-                install_packages()
             
             # Create temporary directory for processing
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -373,7 +418,7 @@ def main():
                     # Step 2: Transcribe audio
                     steps.markdown("""
                     1. ✅ **File Uploaded**
-                    2. ✅ **Environment Setup Complete**
+                    2. ✅ **Dependencies Checked**
                     3. ✅ **Transcribing Audio...**
                     4. 🔄 Translating Text
                     5. ⏳ Generating Audio Segments
@@ -393,7 +438,7 @@ def main():
                     # Step 4: Translate subtitles
                     steps.markdown("""
                     1. ✅ **File Uploaded**
-                    2. ✅ **Environment Setup Complete**
+                    2. ✅ **Dependencies Checked**
                     3. ✅ **Transcribing Audio**
                     4. ✅ **Translating Text...**
                     5. 🔄 Generating Audio Segments
@@ -412,7 +457,7 @@ def main():
                     # Step 5: Generate individual audio files
                     steps.markdown("""
                     1. ✅ **File Uploaded**
-                    2. ✅ **Environment Setup Complete**
+                    2. ✅ **Dependencies Checked**
                     3. ✅ **Transcribing Audio**
                     4. ✅ **Translating Text**
                     5. ✅ **Generating Audio Segments...**
@@ -431,7 +476,7 @@ def main():
                     # Step 6: Create download page
                     steps.markdown("""
                     1. ✅ **File Uploaded**
-                    2. ✅ **Environment Setup Complete**
+                    2. ✅ **Dependencies Checked**
                     3. ✅ **Transcribing Audio**
                     4. ✅ **Translating Text**
                     5. ✅ **Generating Audio Segments**
@@ -472,7 +517,7 @@ def main():
         3. **Click** "Start Audio Dubbing"
         4. **Wait** for processing to complete
         5. **Download** individual audio segments
-        6. **Combine** segments using audio software
+        6. **Combine** segments using free online tools
         
         ### 📋 Supported Features:
         
@@ -480,21 +525,21 @@ def main():
         - 🌐 **20+ language support**
         - ⚡ **Local processing** (no API keys required)
         - 🎙️ **High-quality text-to-speech**
-        - 📝 **Individual segment downloads**
+        - 📦 **ZIP download** for all segments
         
         ### ⚠️ Important Notes:
         
-        - First run may take longer to download models
-        - Audio segments are provided separately (no FFmpeg dependency)
-        - You'll need to combine segments manually
-        - Use online tools or Audacity to combine audio files
+        - First run may take longer to load models
+        - Audio segments are provided separately
+        - Use free online tools to combine segments
+        - Processing time depends on audio length
         """)
 
     # Footer
     st.markdown("---")
     st.markdown(
         "**Audio Dubbing App** • Built with Streamlit • "
-        "No API keys required • No FFmpeg dependency"
+        "No API keys required • No runtime installations"
     )
 
 if __name__ == "__main__":
