@@ -3,7 +3,6 @@ import os
 import tempfile
 import math
 import time
-import io
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -87,7 +86,7 @@ def check_dependencies():
     
     required_packages = {
         "faster-whisper": "faster_whisper",
-        "translate": "translate",
+        "googletrans": "googletrans",
         "gtts": "gtts",
         "pysrt": "pysrt"
     }
@@ -131,8 +130,8 @@ def transcribe_audio(audio_path):
         st.write(f"Found {len(segments)} segments")
         
         # Display first few segments for verification
-        with st.expander("Preview Transcription Segments"):
-            for i, segment in enumerate(segments[:3]):
+        with st.expander("Preview Original Transcription"):
+            for i, segment in enumerate(segments[:5]):
                 st.write(f"**Segment {i+1}:** {segment.text}")
                 st.write(f"Time: {segment.start:.2f}s - {segment.end:.2f}s")
                 st.write("---")
@@ -166,30 +165,47 @@ def generate_subtitle_file(segments, subtitle_path):
         st.error(f"Subtitle generation error: {str(e)}")
         return False
 
-def translate_subtitles(subtitle_path, translated_subtitle_path, target_lang, source_lang="en"):
-    """Translate subtitles to target language"""
+def translate_subtitles_googletrans(subtitle_path, translated_subtitle_path, target_lang, source_lang="auto"):
+    """Translate subtitles using googletrans (more reliable)"""
     try:
         import pysrt
-        from translate import Translator
+        from googletrans import Translator
         
         st.info(f"Translating from {source_lang} to {target_lang}...")
         
         subs = pysrt.open(subtitle_path)
-        translator = Translator(to_lang=target_lang, from_lang=source_lang)
+        translator = Translator()
         
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         translated_count = 0
+        original_texts = []
+        translated_texts = []
+        
         for i, sub in enumerate(subs):
             try:
-                translated_text = translator.translate(sub.text)
-                if translated_text:
-                    sub.text = translated_text
+                original_text = sub.text
+                original_texts.append(original_text)
+                
+                # Translate using googletrans
+                translation = translator.translate(original_text, src=source_lang, dest=target_lang)
+                
+                if translation and translation.text:
+                    sub.text = translation.text
+                    translated_texts.append(translation.text)
                     translated_count += 1
+                    
+                    # Show translation preview for first few segments
+                    if i < 3:
+                        st.write(f"**Original:** {original_text}")
+                        st.write(f"**Translated:** {translation.text}")
+                        st.write("---")
+                
                 progress = (i + 1) / len(subs)
                 progress_bar.progress(progress)
                 status_text.text(f"Translating segment {i+1}/{len(subs)}")
+                
             except Exception as e:
                 st.warning(f"Could not translate segment {i+1}: {str(e)}")
                 continue
@@ -197,6 +213,16 @@ def translate_subtitles(subtitle_path, translated_subtitle_path, target_lang, so
         subs.save(translated_subtitle_path, encoding='utf-8')
         progress_bar.empty()
         status_text.empty()
+        
+        # Show translation summary
+        with st.expander("View Translation Summary"):
+            st.write(f"**Total segments:** {len(subs)}")
+            st.write(f"**Successfully translated:** {translated_count}")
+            if original_texts and translated_texts:
+                st.write("**Sample translations:**")
+                for i in range(min(3, len(original_texts))):
+                    st.write(f"{i+1}. **Original:** {original_texts[i]}")
+                    st.write(f"   **Translated:** {translated_texts[i]}")
         
         st.success(f"Translated {translated_count}/{len(subs)} segments successfully")
         return True
@@ -232,13 +258,17 @@ def generate_individual_audio_files(translated_subtitle_path, temp_dir, target_l
                     audio_file_path = os.path.join(temp_dir, f"segment_{i}.mp3")
                     tts.save(audio_file_path)
                     
-                    audio_files.append({
-                        'path': audio_file_path,
-                        'start_time': sub.start.ordinal / 1000.0,
-                        'text': text,
-                        'index': i
-                    })
-                    successful_segments += 1
+                    # Check if file was created successfully
+                    if os.path.exists(audio_file_path) and os.path.getsize(audio_file_path) > 0:
+                        audio_files.append({
+                            'path': audio_file_path,
+                            'start_time': sub.start.ordinal / 1000.0,
+                            'text': text,
+                            'index': i
+                        })
+                        successful_segments += 1
+                    else:
+                        st.warning(f"Audio file for segment {i+1} was not created properly")
                     
                 except Exception as e:
                     st.warning(f"Could not generate audio for segment {i+1}: {str(e)}")
@@ -258,9 +288,10 @@ def generate_individual_audio_files(translated_subtitle_path, temp_dir, target_l
         st.error(f"Audio segment generation error: {str(e)}")
         return []
 
-def create_audio_download_page(audio_files, target_lang):
+def create_audio_download_page(audio_files, target_lang, original_lang):
     """Create a download page for individual audio files"""
     st.header("🎵 Generated Audio Segments")
+    st.success(f"Successfully translated from {original_lang} to {target_lang}!")
     st.info("""
     **Download individual audio segments below.** 
     You can combine them using free online tools like AudioJoiner.com or desktop software like Audacity.
@@ -290,11 +321,13 @@ def create_audio_download_page(audio_files, target_lang):
     st.markdown("---")
     
     # Individual segment downloads
+    st.subheader("Individual Segments")
     for audio_file in audio_files:
         col1, col2, col3 = st.columns([3, 1, 1])
         
         with col1:
-            st.write(f"**Segment {audio_file['index'] + 1}:** {audio_file['text']}")
+            st.write(f"**Segment {audio_file['index'] + 1}:**")
+            st.write(f"`{audio_file['text']}`")
             st.write(f"Start time: {audio_file['start_time']:.2f}s")
         
         with col2:
@@ -329,10 +362,6 @@ def create_audio_download_page(audio_files, target_lang):
     ```bash
     ffmpeg -i "concat:segment_0.mp3|segment_1.mp3|segment_2.mp3" -c copy combined.mp3
     ```
-    
-    **Mobile Apps:**
-    - **Audio Evolution Mobile** (Android/iOS)
-    - **BandLab** (Android/iOS) - Free music studio
     """)
 
 def main():
@@ -355,7 +384,7 @@ def main():
         ### 📋 Required packages for `requirements.txt`:
         ```txt
         faster-whisper>=0.9.0
-        translate>=3.6.1
+        googletrans==3.1.0a0
         gtts>=2.3.2
         pysrt>=1.1.2
         ```
@@ -368,15 +397,15 @@ def main():
     # Language selection
     st.sidebar.markdown("### Language Settings")
     source_lang = st.sidebar.selectbox(
-        "Source Language (for translation)",
-        list(LANGUAGE_MAPPING.keys()),
+        "Source Language (auto-detected)",
+        ["Auto-detect"] + list(LANGUAGE_MAPPING.keys()),
         index=0
     )
     
     target_lang = st.sidebar.selectbox(
         "Target Language (for dubbing)",
         list(LANGUAGE_MAPPING.keys()),
-        index=7  # Default to Tamil
+        index=0  # Default to English
     )
     
     # File upload
@@ -424,11 +453,19 @@ def main():
                     5. ⏳ Generating Audio Segments
                     """)
                     
-                    source_lang_code, segments = transcribe_audio(input_audio_path)
+                    detected_language, segments = transcribe_audio(input_audio_path)
                     
                     if segments is None or len(segments) == 0:
                         st.error("Transcription failed or no speech detected. Please try again with a different audio file.")
                         return
+                    
+                    # Determine source language
+                    if source_lang == "Auto-detect":
+                        source_lang_code = detected_language
+                    else:
+                        source_lang_code = LANGUAGE_MAPPING[source_lang]
+                    
+                    st.info(f"Using source language: {source_lang_code}")
                     
                     # Step 3: Generate original subtitles
                     original_subtitle_path = os.path.join(temp_dir, "original_subtitles.srt")
@@ -445,11 +482,12 @@ def main():
                     """)
                     
                     translated_subtitle_path = os.path.join(temp_dir, "translated_subtitles.srt")
+                    target_lang_code = LANGUAGE_MAPPING[target_lang]
                     
-                    if not translate_subtitles(
+                    if not translate_subtitles_googletrans(
                         original_subtitle_path, 
                         translated_subtitle_path, 
-                        LANGUAGE_MAPPING[target_lang],
+                        target_lang_code,
                         source_lang_code
                     ):
                         return
@@ -466,7 +504,7 @@ def main():
                     audio_files = generate_individual_audio_files(
                         translated_subtitle_path,
                         temp_dir,
-                        LANGUAGE_MAPPING[target_lang]
+                        target_lang_code
                     )
                     
                     if not audio_files:
@@ -482,7 +520,7 @@ def main():
                     5. ✅ **Generating Audio Segments**
                     """)
                     
-                    create_audio_download_page(audio_files, target_lang)
+                    create_audio_download_page(audio_files, target_lang, source_lang_code)
                     
                     # Show processing summary
                     st.markdown("---")
@@ -503,7 +541,7 @@ def main():
                     **Troubleshooting tips:**
                     - Try a shorter audio file (under 1 minute)
                     - Ensure the audio has clear speech
-                    - Check your internet connection
+                    - Check your internet connection (for translation)
                     - Try MP3 format instead of WAV
                     """)
 
@@ -513,7 +551,7 @@ def main():
         ### 🚀 How to use this app:
         
         1. **Upload** an audio file (MP3, WAV, M4A)
-        2. **Select** source and target languages
+        2. **Select** target language (source is auto-detected)
         3. **Click** "Start Audio Dubbing"
         4. **Wait** for processing to complete
         5. **Download** individual audio segments
@@ -523,23 +561,23 @@ def main():
         
         - 🎵 **Audio file upload** (MP3, WAV, M4A)
         - 🌐 **20+ language support**
-        - ⚡ **Local processing** (no API keys required)
+        - 🔍 **Auto language detection**
+        - ⚡ **Reliable translation** using Google Translate
         - 🎙️ **High-quality text-to-speech**
-        - 📦 **ZIP download** for all segments
         
         ### ⚠️ Important Notes:
         
         - First run may take longer to load models
+        - Internet required for translation
         - Audio segments are provided separately
         - Use free online tools to combine segments
-        - Processing time depends on audio length
         """)
 
     # Footer
     st.markdown("---")
     st.markdown(
         "**Audio Dubbing App** • Built with Streamlit • "
-        "No API keys required • No runtime installations"
+        "Reliable translation with googletrans"
     )
 
 if __name__ == "__main__":
